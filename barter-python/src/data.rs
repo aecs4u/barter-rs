@@ -5,11 +5,20 @@ use barter_data::{
     event::{DataKind, MarketEvent},
     exchange::{
         binance::{futures::BinanceFuturesUsd, spot::BinanceSpot},
+        bitfinex::Bitfinex,
+        bitmex::Bitmex,
+        bybit::{futures::BybitPerpetualsUsd, spot::BybitSpot},
         coinbase::Coinbase,
+        gateio::{
+            future::GateioFuturesUsd,
+            perpetual::GateioPerpetualsUsd,
+            spot::GateioSpot,
+        },
+        kraken::Kraken,
         okx::Okx,
     },
-    streams::{Streams, reconnect::{Event, stream::ReconnectingStream}},
-    subscription::trade::PublicTrades,
+    streams::{Streams, consumer::MarketStreamResult, reconnect::{Event, stream::ReconnectingStream}},
+    subscription::{book::OrderBooksL1, trade::PublicTrades},
 };
 use barter_instrument::{
     exchange::ExchangeId,
@@ -235,87 +244,106 @@ impl PySubscription {
 
 /// Build and start a market data stream from subscription specs.
 ///
-/// This function blocks briefly to initialise the WebSocket connections on the
-/// Tokio runtime, then returns a `MarketDataStream` async iterator.
+/// Supported data kinds: "trades" (public trades) and "order_book_l1" (best bid/ask).
+///
+/// Supported exchanges: binance_spot, binance_futures_usd, okx, coinbase,
+/// kraken, bitfinex, bitmex, bybit_spot, bybit_perpetuals_usd,
+/// gateio_spot, gateio_perpetuals_usd, gateio_futures_usd.
 #[pyfunction]
 pub fn build_market_stream(
     py: Python<'_>,
     subscriptions: Vec<PySubscription>,
 ) -> PyResult<PyMarketDataStream> {
     let mut trade_subs: Vec<(String, String, String, String)> = Vec::new();
+    let mut l1_subs: Vec<(String, String, String, String)> = Vec::new();
 
     for sub in &subscriptions {
+        let entry = (
+            sub.exchange.clone(),
+            sub.base.clone(),
+            sub.quote_asset.clone(),
+            sub.instrument_kind.clone(),
+        );
         match sub.data_kind.as_str() {
-            "trades" | "public_trades" => {
-                trade_subs.push((
-                    sub.exchange.clone(),
-                    sub.base.clone(),
-                    sub.quote_asset.clone(),
-                    sub.instrument_kind.clone(),
-                ));
-            }
+            "trades" | "public_trades" => trade_subs.push(entry),
+            "order_book_l1" | "l1" => l1_subs.push(entry),
             other => {
                 return Err(PyRuntimeError::new_err(format!(
-                    "unsupported data_kind: '{other}'. Use 'trades'."
+                    "unsupported data_kind: '{other}'. Use 'trades' or 'order_book_l1'."
                 )));
             }
         }
     }
 
+    // Macro to reduce boilerplate for adding exchange subscriptions
+    macro_rules! add_trade_subs {
+        ($builder:expr, $exchange_name:expr, $exchange_type:expr, $subs:expr) => {{
+            let subs: Vec<_> = $subs
+                .iter()
+                .filter(|(ex, _, _, _)| ex == $exchange_name)
+                .map(|(_, base, quote, kind)| {
+                    ($exchange_type, base.as_str(), quote.as_str(), parse_instrument_kind(kind), PublicTrades)
+                })
+                .collect();
+            if !subs.is_empty() {
+                $builder = $builder.subscribe(subs);
+            }
+        }};
+    }
+
+    macro_rules! add_l1_subs {
+        ($builder:expr, $exchange_name:expr, $exchange_type:expr, $subs:expr) => {{
+            let subs: Vec<_> = $subs
+                .iter()
+                .filter(|(ex, _, _, _)| ex == $exchange_name)
+                .map(|(_, base, quote, kind)| {
+                    ($exchange_type, base.as_str(), quote.as_str(), parse_instrument_kind(kind), OrderBooksL1)
+                })
+                .collect();
+            if !subs.is_empty() {
+                $builder = $builder.subscribe(subs);
+            }
+        }};
+    }
+
     // Release the GIL while doing blocking I/O on the Tokio runtime
     let result = py.allow_threads(|| {
         crate::runtime::get_runtime().block_on(async {
-            let mut builder = Streams::<PublicTrades>::builder();
+            // Use multi-builder to combine trades and L1 into a unified DataKind stream
+            let mut multi: barter_data::streams::builder::multi::MultiStreamBuilder<
+                MarketStreamResult<MarketDataInstrument, DataKind>,
+            > = Streams::builder_multi();
 
-            // BinanceSpot
-            let subs: Vec<_> = trade_subs
-                .iter()
-                .filter(|(ex, _, _, _)| ex == "binance_spot")
-                .map(|(_, base, quote, kind)| {
-                    (BinanceSpot::default(), base.as_str(), quote.as_str(), parse_instrument_kind(kind), PublicTrades)
-                })
-                .collect();
-            if !subs.is_empty() {
-                builder = builder.subscribe(subs);
+            // --- PublicTrades ---
+            if !trade_subs.is_empty() {
+                let mut builder = Streams::<PublicTrades>::builder();
+                add_trade_subs!(builder, "binance_spot", BinanceSpot::default(), trade_subs);
+                add_trade_subs!(builder, "binance_futures_usd", BinanceFuturesUsd::default(), trade_subs);
+                add_trade_subs!(builder, "okx", Okx, trade_subs);
+                add_trade_subs!(builder, "coinbase", Coinbase, trade_subs);
+                add_trade_subs!(builder, "kraken", Kraken, trade_subs);
+                add_trade_subs!(builder, "bitfinex", Bitfinex, trade_subs);
+                add_trade_subs!(builder, "bitmex", Bitmex, trade_subs);
+                add_trade_subs!(builder, "bybit_spot", BybitSpot::default(), trade_subs);
+                add_trade_subs!(builder, "bybit_perpetuals_usd", BybitPerpetualsUsd::default(), trade_subs);
+                add_trade_subs!(builder, "gateio_spot", GateioSpot::default(), trade_subs);
+                add_trade_subs!(builder, "gateio_perpetuals_usd", GateioPerpetualsUsd::default(), trade_subs);
+                add_trade_subs!(builder, "gateio_futures_usd", GateioFuturesUsd::default(), trade_subs);
+                multi = multi.add(builder);
             }
 
-            // BinanceFuturesUsd
-            let subs: Vec<_> = trade_subs
-                .iter()
-                .filter(|(ex, _, _, _)| ex == "binance_futures_usd")
-                .map(|(_, base, quote, kind)| {
-                    (BinanceFuturesUsd::default(), base.as_str(), quote.as_str(), parse_instrument_kind(kind), PublicTrades)
-                })
-                .collect();
-            if !subs.is_empty() {
-                builder = builder.subscribe(subs);
+            // --- OrderBooksL1 (supported: Binance, Kraken, Bybit) ---
+            if !l1_subs.is_empty() {
+                let mut builder = Streams::<OrderBooksL1>::builder();
+                add_l1_subs!(builder, "binance_spot", BinanceSpot::default(), l1_subs);
+                add_l1_subs!(builder, "binance_futures_usd", BinanceFuturesUsd::default(), l1_subs);
+                add_l1_subs!(builder, "kraken", Kraken, l1_subs);
+                add_l1_subs!(builder, "bybit_spot", BybitSpot::default(), l1_subs);
+                add_l1_subs!(builder, "bybit_perpetuals_usd", BybitPerpetualsUsd::default(), l1_subs);
+                multi = multi.add(builder);
             }
 
-            // OKX
-            let subs: Vec<_> = trade_subs
-                .iter()
-                .filter(|(ex, _, _, _)| ex == "okx")
-                .map(|(_, base, quote, kind)| {
-                    (Okx, base.as_str(), quote.as_str(), parse_instrument_kind(kind), PublicTrades)
-                })
-                .collect();
-            if !subs.is_empty() {
-                builder = builder.subscribe(subs);
-            }
-
-            // Coinbase
-            let subs: Vec<_> = trade_subs
-                .iter()
-                .filter(|(ex, _, _, _)| ex == "coinbase")
-                .map(|(_, base, quote, kind)| {
-                    (Coinbase, base.as_str(), quote.as_str(), parse_instrument_kind(kind), PublicTrades)
-                })
-                .collect();
-            if !subs.is_empty() {
-                builder = builder.subscribe(subs);
-            }
-
-            let streams = builder
+            let streams = multi
                 .init()
                 .await
                 .map_err(|e| PyRuntimeError::new_err(format!("failed to init streams: {e:?}")))?;
@@ -332,7 +360,7 @@ pub fn build_market_stream(
                 while let Some(event) = joined.next().await {
                     match event {
                         Event::Item(market_event) => {
-                            let py_event = PyMarketEvent::from_trade_event(&market_event);
+                            let py_event = PyMarketEvent::from_market_event(&market_event);
                             if tx.send(py_event).is_err() {
                                 break;
                             }
