@@ -6,6 +6,7 @@ A high-performance Rust-powered library for:
 - Trading instrument management with O(1) indexed lookups
 - Portfolio statistics (Sharpe, Sortino, Calmar, Drawdown, etc.)
 - Backtesting with historical market data and mock execution
+- Custom strategy and risk management callbacks
 
 Quick Start:
     >>> from barter import ExchangeId, Instrument, IndexedInstruments
@@ -16,9 +17,19 @@ Quick Start:
 
     # Stream live market data
     >>> from barter import Subscription, build_market_stream
-    >>> stream = await build_market_stream([Subscription("binance_spot", "btc", "usdt")])
+    >>> stream = build_market_stream([Subscription("binance_spot", "btc", "usdt")])
     >>> async for event in stream:
     ...     print(event)
+
+    # Run a backtest with a custom strategy
+    >>> from barter import run_backtest, OrderRequestOpen
+    >>> def my_strategy(state):
+    ...     orders = []
+    ...     price = state.price(0)
+    ...     if price and price < 50000:
+    ...         orders.append(OrderRequestOpen(0, 0, "buy", price, 0.001))
+    ...     return orders
+    >>> summary = await run_backtest(config_json, data_json, strategy=my_strategy)
 """
 
 from barter._barter import (
@@ -30,6 +41,11 @@ from barter._barter import (
     # Execution types
     Balance,
     PublicTrade,
+    # Order types
+    OrderRequestOpen,
+    OrderRequestCancel,
+    # Engine state
+    EngineState,
     # Market data
     MarketEvent,
     MarketDataStream,
@@ -51,6 +67,11 @@ __all__ = [
     # Execution types
     "Balance",
     "PublicTrade",
+    # Order types
+    "OrderRequestOpen",
+    "OrderRequestCancel",
+    # Engine state
+    "EngineState",
     # Market data
     "MarketEvent",
     "MarketDataStream",
@@ -63,4 +84,4 @@ __all__ = [
     "run_backtest",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

@@ -5,6 +5,7 @@
 //! - Trading instrument definitions and indexed lookups
 //! - Portfolio statistics and performance analysis
 //! - Backtesting with historical market data
+//! - Custom strategy and risk management callbacks
 
 use pyo3::prelude::*;
 
@@ -15,7 +16,9 @@ pub mod data;
 pub mod engine;
 pub mod execution;
 pub mod instrument;
+pub mod order;
 pub mod risk;
+pub mod state;
 pub mod statistics;
 pub mod strategy;
 
@@ -25,6 +28,8 @@ fn _barter(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Register all types and functions
     instrument::register(m)?;
     execution::register(m)?;
+    order::register(m)?;
+    state::register(m)?;
     data::register(m)?;
     statistics::register(m)?;
     engine::register(m)?;
