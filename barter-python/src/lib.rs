@@ -17,6 +17,7 @@ pub mod engine;
 pub mod execution;
 pub mod instrument;
 pub mod order;
+pub mod orderbook;
 pub mod risk;
 pub mod state;
 pub mod statistics;
@@ -29,6 +30,7 @@ fn _barter(m: &Bound<'_, PyModule>) -> PyResult<()> {
     instrument::register(m)?;
     execution::register(m)?;
     order::register(m)?;
+    orderbook::register(m)?;
     state::register(m)?;
     data::register(m)?;
     statistics::register(m)?;

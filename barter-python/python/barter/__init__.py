@@ -46,6 +46,10 @@ from barter._barter import (
     OrderRequestCancel,
     # Engine state
     EngineState,
+    # Order books
+    OrderBook,
+    OrderBookManager,
+    build_order_book_manager,
     # Market data
     MarketEvent,
     MarketDataStream,
@@ -72,6 +76,10 @@ __all__ = [
     "OrderRequestCancel",
     # Engine state
     "EngineState",
+    # Order books
+    "OrderBook",
+    "OrderBookManager",
+    "build_order_book_manager",
     # Market data
     "MarketEvent",
     "MarketDataStream",
