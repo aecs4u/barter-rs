@@ -39,16 +39,20 @@ use rust_decimal::Decimal;
 ///     config_json: str — JSON string matching SystemConfig format
 ///     market_data_json: str — JSON array of MarketStreamResult events
 ///     risk_free_return: float — risk-free rate (e.g. 0.05)
+///     strategy: callable — fn(state: EngineState) -> (List[OrderRequestCancel], List[OrderRequestOpen])
+///     risk: callable — fn(state: EngineState, opens: List[OrderRequestOpen]) -> List[OrderRequestOpen]
 ///
 /// Returns:
 ///     TradingSummary
 #[pyfunction]
-#[pyo3(signature = (config_json, market_data_json, risk_free_return=0.05))]
+#[pyo3(signature = (config_json, market_data_json, risk_free_return=0.05, strategy=None, risk=None))]
 pub fn run_backtest<'py>(
     py: Python<'py>,
     config_json: String,
     market_data_json: String,
     risk_free_return: f64,
+    strategy: Option<PyObject>,
+    risk: Option<PyObject>,
 ) -> PyResult<Bound<'py, PyAny>> {
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         // Parse config
@@ -107,13 +111,16 @@ pub fn run_backtest<'py>(
         .trading_state(TradingState::Enabled)
         .build();
 
-        // Build Engine
+        // Build Engine with Python strategy and risk manager
+        let py_strategy = PyStrategy::new(strategy);
+        let py_risk = PyRiskManager::new(risk);
+
         let engine = barter::engine::Engine::new(
             clock,
             engine_state,
             execution_tx_map,
-            PyStrategy::default_noop(),
-            PyRiskManager::default_noop(),
+            py_strategy,
+            py_risk,
         );
 
         // Build and run system
@@ -141,7 +148,7 @@ pub fn run_backtest<'py>(
             .trading_summary_generator(rfr)
             .generate(Daily);
 
-        Ok(PyTradingSummary::from_daily(&summary))
+        PyTradingSummary::from_daily(&summary)
     })
 }
 

@@ -1,3 +1,5 @@
+use crate::order::{PyOrderRequestCancel, PyOrderRequestOpen};
+use crate::state::PyEngineStateSnapshot;
 use barter::{
     engine::{
         Engine,
@@ -30,13 +32,10 @@ pub type PyEngineState = EngineState<DefaultGlobalData, DefaultInstrumentMarketD
 
 /// A strategy that delegates `generate_algo_orders` to a Python callable.
 ///
-/// The Python callable receives a dict snapshot of the current state and returns
-/// a tuple of (cancel_requests, open_requests) — initially both empty since the
-/// full order generation from Python requires serializing the complex state.
+/// The Python callable receives a `PyEngineStateSnapshot` and must return a
+/// tuple of `(List[OrderRequestCancel], List[OrderRequestOpen])`.
 ///
-/// For the initial release, this serves as a passthrough that enables the Engine
-/// to run. Users can implement real strategy logic by subclassing in Python and
-/// overriding the callback.
+/// If no callback is provided, the strategy is a noop (no orders generated).
 #[derive(Debug)]
 pub struct PyStrategy {
     callback: Option<PyObject>,
@@ -57,18 +56,54 @@ impl AlgoStrategy for PyStrategy {
 
     fn generate_algo_orders(
         &self,
-        _state: &Self::State,
+        state: &Self::State,
     ) -> (
         impl IntoIterator<Item = OrderRequestCancel<ExchangeIndex, InstrumentIndex>>,
         impl IntoIterator<Item = OrderRequestOpen<ExchangeIndex, InstrumentIndex>>,
     ) {
-        // If we have a Python callback, we could call it here via GIL acquisition.
-        // For now, return empty — strategies will be added in a future release.
-        if let Some(ref _cb) = self.callback {
-            // Future: acquire GIL, serialize state snapshot, call Python, parse results
-            // Python::with_gil(|py| { ... });
-        }
-        (std::iter::empty(), std::iter::empty())
+        let Some(ref cb) = self.callback else {
+            return (Vec::new(), Vec::new());
+        };
+
+        // Build a snapshot of the engine state for Python
+        let snapshot = PyEngineStateSnapshot::from_state(state);
+
+        // Acquire the GIL and call the Python strategy function
+        let result: (Vec<OrderRequestCancel<ExchangeIndex, InstrumentIndex>>,
+                      Vec<OrderRequestOpen<ExchangeIndex, InstrumentIndex>>) =
+            Python::with_gil(|py| {
+                let py_result = match cb.call1(py, (snapshot,)) {
+                    Ok(result) => result,
+                    Err(e) => {
+                        eprintln!("Python strategy callback error: {e}");
+                        return (Vec::new(), Vec::new());
+                    }
+                };
+
+                // Parse the returned tuple: (cancels, opens)
+                let tuple = match py_result.extract::<(Vec<PyOrderRequestCancel>, Vec<PyOrderRequestOpen>)>(py) {
+                    Ok(t) => t,
+                    Err(_) => {
+                        // Try extracting just opens (common case: user returns only opens)
+                        match py_result.extract::<Vec<PyOrderRequestOpen>>(py) {
+                            Ok(opens) => (Vec::new(), opens),
+                            Err(e) => {
+                                eprintln!(
+                                    "Python strategy must return (List[OrderRequestCancel], List[OrderRequestOpen]) \
+                                     or List[OrderRequestOpen]: {e}"
+                                );
+                                return (Vec::new(), Vec::new());
+                            }
+                        }
+                    }
+                };
+
+                let cancels = tuple.0.iter().map(|c| c.to_rust()).collect();
+                let opens = tuple.1.iter().map(|o| o.to_rust()).collect();
+                (cancels, opens)
+            });
+
+        result
     }
 }
 
