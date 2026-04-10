@@ -1,3 +1,4 @@
+use crate::global::PyGlobalData;
 use crate::risk::PyRiskManager;
 use crate::statistics::PyTradingSummary;
 use crate::strategy::PyStrategy;
@@ -6,7 +7,6 @@ use barter::{
         clock::HistoricalClock,
         state::{
             EngineState,
-            global::DefaultGlobalData,
             instrument::data::DefaultInstrumentMarketData,
             trading::TradingState,
         },
@@ -39,13 +39,14 @@ use rust_decimal::Decimal;
 ///     config_json: str — JSON string matching SystemConfig format
 ///     market_data_json: str — JSON array of MarketStreamResult events
 ///     risk_free_return: float — risk-free rate (e.g. 0.05)
-///     strategy: callable — fn(state: EngineState) -> (List[OrderRequestCancel], List[OrderRequestOpen])
+///     strategy: callable — fn(state: EngineState) -> List[OrderRequestOpen]
 ///     risk: callable — fn(state: EngineState, opens: List[OrderRequestOpen]) -> List[OrderRequestOpen]
+///     on_fill: callable — fn(trade: TradeFill) called on every trade fill
 ///
 /// Returns:
 ///     TradingSummary
 #[pyfunction]
-#[pyo3(signature = (config_json, market_data_json, risk_free_return=0.05, strategy=None, risk=None))]
+#[pyo3(signature = (config_json, market_data_json, risk_free_return=0.05, strategy=None, risk=None, on_fill=None))]
 pub fn run_backtest<'py>(
     py: Python<'py>,
     config_json: String,
@@ -53,6 +54,7 @@ pub fn run_backtest<'py>(
     risk_free_return: f64,
     strategy: Option<PyObject>,
     risk: Option<PyObject>,
+    on_fill: Option<PyObject>,
 ) -> PyResult<Bound<'py, PyAny>> {
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         // Parse config
@@ -101,10 +103,12 @@ pub fn run_backtest<'py>(
             futures,
         } = execution_build;
 
-        // Build EngineState
+        // Build EngineState with PyGlobalData (for on_fill callback)
+        let global_data = PyGlobalData::new(on_fill);
+
         let engine_state = EngineState::builder(
             &instruments,
-            DefaultGlobalData::default(),
+            global_data,
             |_| DefaultInstrumentMarketData::default(),
         )
         .time_engine_start(time_first)

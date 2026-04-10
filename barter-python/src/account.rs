@@ -146,8 +146,76 @@ impl PyAccountEvent {
     }
 }
 
+// ---------------------------------------------------------------------------
+// PyPositionExited — a closed position
+// ---------------------------------------------------------------------------
+
+#[pyclass(name = "PositionExited", module = "barter")]
+#[derive(Debug, Clone)]
+pub struct PyPositionExited {
+    pub instrument_index: usize,
+    pub side: String,
+    pub price_entry_average: f64,
+    pub quantity_abs_max: f64,
+    pub pnl_realised: f64,
+    pub time_enter: String,
+    pub time_exit: String,
+    pub trade_count: usize,
+}
+
+impl PyPositionExited {
+    pub fn from_position_exited(
+        pos: &barter::engine::state::position::PositionExited<
+            barter_instrument::asset::QuoteAsset,
+            barter_instrument::instrument::InstrumentIndex,
+        >,
+    ) -> Self {
+        Self {
+            instrument_index: pos.instrument.0,
+            side: match pos.side {
+                Side::Buy => "buy".to_string(),
+                Side::Sell => "sell".to_string(),
+            },
+            price_entry_average: decimal_to_f64(&pos.price_entry_average),
+            quantity_abs_max: decimal_to_f64(&pos.quantity_abs_max),
+            pnl_realised: decimal_to_f64(&pos.pnl_realised),
+            time_enter: pos.time_enter.to_rfc3339(),
+            time_exit: pos.time_exit.to_rfc3339(),
+            trade_count: pos.trades.len(),
+        }
+    }
+}
+
+#[pymethods]
+impl PyPositionExited {
+    #[getter]
+    fn instrument_index(&self) -> usize { self.instrument_index }
+    #[getter]
+    fn side(&self) -> &str { &self.side }
+    #[getter]
+    fn price_entry_average(&self) -> f64 { self.price_entry_average }
+    #[getter]
+    fn quantity_abs_max(&self) -> f64 { self.quantity_abs_max }
+    #[getter]
+    fn pnl_realised(&self) -> f64 { self.pnl_realised }
+    #[getter]
+    fn time_enter(&self) -> &str { &self.time_enter }
+    #[getter]
+    fn time_exit(&self) -> &str { &self.time_exit }
+    #[getter]
+    fn trade_count(&self) -> usize { self.trade_count }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "PositionExited(instrument={}, side='{}', pnl={:.2}, qty={}, trades={})",
+            self.instrument_index, self.side, self.pnl_realised, self.quantity_abs_max, self.trade_count,
+        )
+    }
+}
+
 pub fn register(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     parent.add_class::<PyTradeFill>()?;
     parent.add_class::<PyAccountEvent>()?;
+    parent.add_class::<PyPositionExited>()?;
     Ok(())
 }

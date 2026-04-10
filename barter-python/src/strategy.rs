@@ -1,3 +1,4 @@
+use crate::global::PyGlobalData;
 use crate::order::{PyOrderRequestCancel, PyOrderRequestOpen};
 use crate::state::PyEngineStateSnapshot;
 use barter::{
@@ -5,7 +6,6 @@ use barter::{
         Engine,
         state::{
             EngineState,
-            global::DefaultGlobalData,
             instrument::{
                 data::DefaultInstrumentMarketData,
                 filter::InstrumentFilter,
@@ -28,7 +28,7 @@ use barter_instrument::{
 use pyo3::prelude::*;
 
 /// The concrete EngineState type used throughout Python bindings.
-pub type PyEngineState = EngineState<DefaultGlobalData, DefaultInstrumentMarketData>;
+pub type PyEngineState = EngineState<PyGlobalData, DefaultInstrumentMarketData>;
 
 /// A strategy that delegates `generate_algo_orders` to a Python callable.
 ///
