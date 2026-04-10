@@ -1,4 +1,5 @@
 use crate::global::PyGlobalData;
+use crate::instrument_data::PyInstrumentData;
 use crate::order::{PyOrderRequestCancel, PyOrderRequestOpen};
 use crate::state::PyEngineStateSnapshot;
 use barter::{
@@ -6,10 +7,7 @@ use barter::{
         Engine,
         state::{
             EngineState,
-            instrument::{
-                data::DefaultInstrumentMarketData,
-                filter::InstrumentFilter,
-            },
+            instrument::filter::InstrumentFilter,
         },
     },
     strategy::{
@@ -19,7 +17,10 @@ use barter::{
         on_trading_disabled::OnTradingDisabled,
     },
 };
-use barter_execution::order::request::{OrderRequestCancel, OrderRequestOpen};
+use barter_execution::order::{
+    id::StrategyId,
+    request::{OrderRequestCancel, OrderRequestOpen},
+};
 use barter_instrument::{
     asset::AssetIndex,
     exchange::{ExchangeId, ExchangeIndex},
@@ -28,27 +29,86 @@ use barter_instrument::{
 use pyo3::prelude::*;
 
 /// The concrete EngineState type used throughout Python bindings.
-pub type PyEngineState = EngineState<PyGlobalData, DefaultInstrumentMarketData>;
+pub type PyEngineState = EngineState<PyGlobalData, PyInstrumentData>;
 
-/// A strategy that delegates `generate_algo_orders` to a Python callable.
+/// A strategy that delegates `generate_algo_orders` to one or more Python callables.
 ///
-/// The Python callable receives a `PyEngineStateSnapshot` and must return a
-/// tuple of `(List[OrderRequestCancel], List[OrderRequestOpen])`.
-///
-/// If no callback is provided, the strategy is a noop (no orders generated).
+/// - Single strategy: one callback, orders tagged with `strategy_id="default"`
+/// - Multi strategy: multiple named callbacks, each tags its own orders
 #[derive(Debug)]
 pub struct PyStrategy {
-    callback: Option<PyObject>,
+    /// Named strategy callbacks: (strategy_id, python_callable)
+    callbacks: Vec<(StrategyId, PyObject)>,
 }
 
 impl PyStrategy {
+    /// Single strategy mode.
     pub fn new(callback: Option<PyObject>) -> Self {
-        Self { callback }
+        let callbacks = match callback {
+            Some(cb) => vec![(StrategyId::new("default"), cb)],
+            None => vec![],
+        };
+        Self { callbacks }
+    }
+
+    /// Multi-strategy mode.
+    pub fn new_multi(callbacks: Vec<(StrategyId, PyObject)>) -> Self {
+        Self { callbacks }
     }
 
     pub fn default_noop() -> Self {
-        Self { callback: None }
+        Self { callbacks: vec![] }
     }
+}
+
+fn call_strategy_callback(
+    py: Python<'_>,
+    cb: &PyObject,
+    strategy_id: &StrategyId,
+    snapshot: &PyEngineStateSnapshot,
+) -> (
+    Vec<OrderRequestCancel<ExchangeIndex, InstrumentIndex>>,
+    Vec<OrderRequestOpen<ExchangeIndex, InstrumentIndex>>,
+) {
+    let py_result = match cb.call1(py, (snapshot.clone(),)) {
+        Ok(result) => result,
+        Err(e) => {
+            eprintln!("Python strategy '{}' callback error: {e}", strategy_id.0);
+            return (Vec::new(), Vec::new());
+        }
+    };
+
+    // Parse: (cancels, opens) or just opens
+    let tuple = match py_result
+        .extract::<(Vec<PyOrderRequestCancel>, Vec<PyOrderRequestOpen>)>(py)
+    {
+        Ok(t) => t,
+        Err(_) => match py_result.extract::<Vec<PyOrderRequestOpen>>(py) {
+            Ok(opens) => (Vec::new(), opens),
+            Err(e) => {
+                eprintln!(
+                    "Python strategy '{}' must return List[OrderRequestOpen] \
+                     or (List[OrderRequestCancel], List[OrderRequestOpen]): {e}",
+                    strategy_id.0
+                );
+                return (Vec::new(), Vec::new());
+            }
+        },
+    };
+
+    // Override strategy_id on each order to match the callback's name
+    let cancels = tuple.0.iter().map(|c| {
+        let mut r = c.to_rust();
+        r.key.strategy = strategy_id.clone();
+        r
+    }).collect();
+    let opens = tuple.1.iter().map(|o| {
+        let mut r = o.to_rust();
+        r.key.strategy = strategy_id.clone();
+        r
+    }).collect();
+
+    (cancels, opens)
 }
 
 impl AlgoStrategy for PyStrategy {
@@ -61,49 +121,25 @@ impl AlgoStrategy for PyStrategy {
         impl IntoIterator<Item = OrderRequestCancel<ExchangeIndex, InstrumentIndex>>,
         impl IntoIterator<Item = OrderRequestOpen<ExchangeIndex, InstrumentIndex>>,
     ) {
-        let Some(ref cb) = self.callback else {
+        if self.callbacks.is_empty() {
             return (Vec::new(), Vec::new());
-        };
+        }
 
-        // Build a snapshot of the engine state for Python
         let snapshot = PyEngineStateSnapshot::from_state(state);
 
-        // Acquire the GIL and call the Python strategy function
-        let result: (Vec<OrderRequestCancel<ExchangeIndex, InstrumentIndex>>,
-                      Vec<OrderRequestOpen<ExchangeIndex, InstrumentIndex>>) =
-            Python::with_gil(|py| {
-                let py_result = match cb.call1(py, (snapshot,)) {
-                    Ok(result) => result,
-                    Err(e) => {
-                        eprintln!("Python strategy callback error: {e}");
-                        return (Vec::new(), Vec::new());
-                    }
-                };
+        Python::with_gil(|py| {
+            let mut all_cancels = Vec::new();
+            let mut all_opens = Vec::new();
 
-                // Parse the returned tuple: (cancels, opens)
-                let tuple = match py_result.extract::<(Vec<PyOrderRequestCancel>, Vec<PyOrderRequestOpen>)>(py) {
-                    Ok(t) => t,
-                    Err(_) => {
-                        // Try extracting just opens (common case: user returns only opens)
-                        match py_result.extract::<Vec<PyOrderRequestOpen>>(py) {
-                            Ok(opens) => (Vec::new(), opens),
-                            Err(e) => {
-                                eprintln!(
-                                    "Python strategy must return (List[OrderRequestCancel], List[OrderRequestOpen]) \
-                                     or List[OrderRequestOpen]: {e}"
-                                );
-                                return (Vec::new(), Vec::new());
-                            }
-                        }
-                    }
-                };
+            for (strategy_id, cb) in &self.callbacks {
+                let (cancels, opens) =
+                    call_strategy_callback(py, cb, strategy_id, &snapshot);
+                all_cancels.extend(cancels);
+                all_opens.extend(opens);
+            }
 
-                let cancels = tuple.0.iter().map(|c| c.to_rust()).collect();
-                let opens = tuple.1.iter().map(|o| o.to_rust()).collect();
-                (cancels, opens)
-            });
-
-        result
+            (all_cancels, all_opens)
+        })
     }
 }
 

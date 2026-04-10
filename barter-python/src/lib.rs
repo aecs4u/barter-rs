@@ -18,6 +18,7 @@ pub mod engine;
 pub mod execution;
 pub mod global;
 pub mod instrument;
+pub mod instrument_data;
 pub mod order;
 pub mod orderbook;
 pub mod risk;
