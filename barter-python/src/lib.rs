@@ -16,6 +16,7 @@ pub mod account;
 pub mod data;
 pub mod engine;
 pub mod execution;
+pub mod global;
 pub mod instrument;
 pub mod order;
 pub mod orderbook;

@@ -36,6 +36,7 @@ from barter._barter import (
     # Account event types
     TradeFill,
     AccountEvent,
+    PositionExited,
     # Instrument types
     Side,
     ExchangeId,
@@ -69,6 +70,7 @@ __all__ = [
     # Account event types
     "TradeFill",
     "AccountEvent",
+    "PositionExited",
     # Instrument types
     "Side",
     "ExchangeId",
