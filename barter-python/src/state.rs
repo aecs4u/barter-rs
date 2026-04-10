@@ -25,10 +25,18 @@ pub struct InstrumentSnapshot {
     pub name_exchange: String,
     pub kind: String,
     pub price: Option<f64>,
+    // Position fields
     pub position_side: Option<String>,
     pub position_quantity: Option<f64>,
+    pub position_quantity_max: Option<f64>,
     pub position_entry_price: Option<f64>,
     pub position_pnl_unrealised: Option<f64>,
+    pub position_pnl_realised: Option<f64>,
+    pub position_trade_count: Option<usize>,
+    pub position_time_enter: Option<String>,
+    pub position_time_update: Option<String>,
+    // Open orders count
+    pub open_orders_count: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -45,21 +53,27 @@ impl PyEngineStateSnapshot {
         for (_name, inst_state) in state.instruments.0.iter() {
             let price = inst_state.data.price().map(|d| decimal_to_f64(&d));
 
-            let (pos_side, pos_qty, pos_entry, pos_pnl) = match &inst_state.position.current {
-                Some(pos) => {
-                    let side = match pos.side {
-                        Side::Buy => "buy",
-                        Side::Sell => "sell",
-                    };
-                    (
-                        Some(side.to_string()),
-                        Some(decimal_to_f64(&pos.quantity_abs)),
-                        Some(decimal_to_f64(&pos.price_entry_average)),
-                        Some(decimal_to_f64(&pos.pnl_unrealised)),
-                    )
-                }
-                None => (None, None, None, None),
-            };
+            let (pos_side, pos_qty, pos_qty_max, pos_entry, pos_pnl_u, pos_pnl_r, pos_trades, pos_enter, pos_update) =
+                match &inst_state.position.current {
+                    Some(pos) => {
+                        let side = match pos.side {
+                            Side::Buy => "buy",
+                            Side::Sell => "sell",
+                        };
+                        (
+                            Some(side.to_string()),
+                            Some(decimal_to_f64(&pos.quantity_abs)),
+                            Some(decimal_to_f64(&pos.quantity_abs_max)),
+                            Some(decimal_to_f64(&pos.price_entry_average)),
+                            Some(decimal_to_f64(&pos.pnl_unrealised)),
+                            Some(decimal_to_f64(&pos.pnl_realised)),
+                            Some(pos.trades.len()),
+                            Some(pos.time_enter.to_rfc3339()),
+                            Some(pos.time_exchange_update.to_rfc3339()),
+                        )
+                    }
+                    None => (None, None, None, None, None, None, None, None, None),
+                };
 
             let kind = match &inst_state.instrument.kind {
                 barter_instrument::instrument::kind::InstrumentKind::Spot => "spot",
@@ -67,6 +81,8 @@ impl PyEngineStateSnapshot {
                 barter_instrument::instrument::kind::InstrumentKind::Future(_) => "future",
                 barter_instrument::instrument::kind::InstrumentKind::Option(_) => "option",
             };
+
+            let open_orders_count = inst_state.orders.0.len();
 
             instruments.push(InstrumentSnapshot {
                 index: inst_state.key.0,
@@ -76,8 +92,14 @@ impl PyEngineStateSnapshot {
                 price,
                 position_side: pos_side,
                 position_quantity: pos_qty,
+                position_quantity_max: pos_qty_max,
                 position_entry_price: pos_entry,
-                position_pnl_unrealised: pos_pnl,
+                position_pnl_unrealised: pos_pnl_u,
+                position_pnl_realised: pos_pnl_r,
+                position_trade_count: pos_trades,
+                position_time_enter: pos_enter,
+                position_time_update: pos_update,
+                open_orders_count,
             });
         }
 
@@ -125,6 +147,8 @@ impl PyEngineStateSnapshot {
             d.set_item("position_quantity", inst.position_quantity)?;
             d.set_item("position_entry_price", inst.position_entry_price)?;
             d.set_item("position_pnl_unrealised", inst.position_pnl_unrealised)?;
+            d.set_item("position_pnl_realised", inst.position_pnl_realised)?;
+            d.set_item("open_orders_count", inst.open_orders_count)?;
             list.append(d)?;
         }
         Ok(list.into())
@@ -163,12 +187,26 @@ impl PyEngineStateSnapshot {
                 let d = PyDict::new(py);
                 d.set_item("side", i.position_side.as_deref())?;
                 d.set_item("quantity", i.position_quantity)?;
+                d.set_item("quantity_max", i.position_quantity_max)?;
                 d.set_item("entry_price", i.position_entry_price)?;
                 d.set_item("pnl_unrealised", i.position_pnl_unrealised)?;
+                d.set_item("pnl_realised", i.position_pnl_realised)?;
+                d.set_item("trade_count", i.position_trade_count)?;
+                d.set_item("time_enter", i.position_time_enter.as_deref())?;
+                d.set_item("time_update", i.position_time_update.as_deref())?;
                 Ok(d.into())
             }
             _ => Ok(py.None()),
         }
+    }
+
+    /// Get the number of open orders for an instrument by index.
+    fn open_orders(&self, instrument_index: usize) -> usize {
+        self.instruments
+            .iter()
+            .find(|i| i.index == instrument_index)
+            .map(|i| i.open_orders_count)
+            .unwrap_or(0)
     }
 
     /// Get the balance for a named asset (or None).
