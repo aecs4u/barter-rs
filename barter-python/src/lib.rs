@@ -12,6 +12,7 @@ use pyo3::prelude::*;
 mod decimal;
 mod runtime;
 
+pub mod account;
 pub mod data;
 pub mod engine;
 pub mod execution;
@@ -27,6 +28,7 @@ pub mod strategy;
 #[pymodule]
 fn _barter(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Register all types and functions
+    account::register(m)?;
     instrument::register(m)?;
     execution::register(m)?;
     order::register(m)?;

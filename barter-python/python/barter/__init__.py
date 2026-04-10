@@ -33,6 +33,9 @@ Quick Start:
 """
 
 from barter._barter import (
+    # Account event types
+    TradeFill,
+    AccountEvent,
     # Instrument types
     Side,
     ExchangeId,
@@ -63,6 +66,9 @@ from barter._barter import (
 )
 
 __all__ = [
+    # Account event types
+    "TradeFill",
+    "AccountEvent",
     # Instrument types
     "Side",
     "ExchangeId",
