@@ -22,8 +22,11 @@ use barter_instrument::{
 use barter_integration::collection::snapshot::Snapshot;
 use chrono::{DateTime, Utc};
 use pyo3::prelude::*;
+use pyo3::exceptions::PyRuntimeError;
 use pyo3::types::PyDict;
 use rust_decimal::Decimal;
+use serde::Serialize;
+use serde_json::{Value, json};
 
 // ---------------------------------------------------------------------------
 // TradingSummary wrapper (generic over interval — we monomorphize)
@@ -40,22 +43,82 @@ pub struct PyTradingSummary {
 }
 
 impl PyTradingSummary {
-    pub fn from_daily(summary: &TradingSummary<Daily>) -> Self {
-        Self {
-            summary_json: serde_json::to_string_pretty(summary).unwrap_or_default(),
-            time_start: summary.time_engine_start.to_rfc3339(),
-            time_end: summary.time_engine_end.to_rfc3339(),
-            duration_secs: summary.trading_duration().num_seconds() as f64,
-        }
+    fn summary_to_json<Interval>(summary: &TradingSummary<Interval>) -> PyResult<String>
+    where
+        Interval: Serialize,
+    {
+        let instruments: PyResult<Vec<Value>> = summary
+            .instruments
+            .iter()
+            .map(|(instrument, tear_sheet)| {
+                let value = serde_json::to_value(tear_sheet).map_err(|e| {
+                    PyRuntimeError::new_err(format!(
+                        "failed to serialize instrument summary for {instrument}: {e}"
+                    ))
+                })?;
+                Ok(json!({
+                    "instrument": instrument.to_string(),
+                    "summary": value,
+                }))
+            })
+            .collect();
+
+        let assets: PyResult<Vec<Value>> = summary
+            .assets
+            .iter()
+            .map(|(exchange_asset, tear_sheet)| {
+                let value = serde_json::to_value(tear_sheet).map_err(|e| {
+                    PyRuntimeError::new_err(format!(
+                        "failed to serialize asset summary for {:?}: {e}",
+                        exchange_asset
+                    ))
+                })?;
+                let exchange = serde_json::to_value(exchange_asset.exchange).map_err(|e| {
+                    PyRuntimeError::new_err(format!(
+                        "failed to serialize asset exchange key {:?}: {e}",
+                        exchange_asset.exchange
+                    ))
+                })?;
+                let asset = serde_json::to_value(&exchange_asset.asset).map_err(|e| {
+                    PyRuntimeError::new_err(format!(
+                        "failed to serialize asset key {:?}: {e}",
+                        exchange_asset.asset
+                    ))
+                })?;
+                Ok(json!({
+                    "exchange": exchange,
+                    "asset": asset,
+                    "summary": value,
+                }))
+            })
+            .collect();
+
+        serde_json::to_string_pretty(&json!({
+            "time_engine_start": summary.time_engine_start,
+            "time_engine_end": summary.time_engine_end,
+            "trading_duration_secs": summary.trading_duration().num_seconds(),
+            "instruments": instruments?,
+            "assets": assets?,
+        }))
+        .map_err(|e| PyRuntimeError::new_err(format!("failed to serialize trading summary: {e}")))
     }
 
-    pub fn from_annual365(summary: &TradingSummary<Annual365>) -> Self {
-        Self {
-            summary_json: serde_json::to_string_pretty(summary).unwrap_or_default(),
+    pub fn from_daily(summary: &TradingSummary<Daily>) -> PyResult<Self> {
+        Ok(Self {
+            summary_json: Self::summary_to_json(summary)?,
             time_start: summary.time_engine_start.to_rfc3339(),
             time_end: summary.time_engine_end.to_rfc3339(),
             duration_secs: summary.trading_duration().num_seconds() as f64,
-        }
+        })
+    }
+
+    pub fn from_annual365(summary: &TradingSummary<Annual365>) -> PyResult<Self> {
+        Ok(Self {
+            summary_json: Self::summary_to_json(summary)?,
+            time_start: summary.time_engine_start.to_rfc3339(),
+            time_end: summary.time_engine_end.to_rfc3339(),
+            duration_secs: summary.trading_duration().num_seconds() as f64,
+        })
     }
 }
 
@@ -242,11 +305,11 @@ impl PyTradingSummaryGenerator {
         match interval {
             "daily" => {
                 let summary = self.inner.clone().generate(Daily);
-                Ok(PyTradingSummary::from_daily(&summary))
+                PyTradingSummary::from_daily(&summary)
             }
             "annual365" | "annual_365" | "crypto" => {
                 let summary = self.inner.clone().generate(Annual365);
-                Ok(PyTradingSummary::from_annual365(&summary))
+                PyTradingSummary::from_annual365(&summary)
             }
             other => Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "unknown interval: '{other}'. Use 'daily' or 'annual365'."
