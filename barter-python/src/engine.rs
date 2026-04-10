@@ -1,3 +1,5 @@
+use crate::global::PyGlobalData;
+use crate::instrument_data::PyInstrumentData;
 use crate::risk::PyRiskManager;
 use crate::statistics::PyTradingSummary;
 use crate::strategy::PyStrategy;
@@ -6,8 +8,6 @@ use barter::{
         clock::HistoricalClock,
         state::{
             EngineState,
-            global::DefaultGlobalData,
-            instrument::data::DefaultInstrumentMarketData,
             trading::TradingState,
         },
     },
@@ -23,11 +23,13 @@ use barter_data::{
     streams::consumer::MarketStreamResult,
     streams::reconnect::stream::ReconnectingStream,
 };
+use barter_execution::order::id::StrategyId;
 use barter_instrument::{index::IndexedInstruments, instrument::InstrumentIndex};
 use futures::stream;
 use pyo3::prelude::*;
 use pyo3::exceptions::PyRuntimeError;
 use rust_decimal::Decimal;
+use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
 // run_backtest — high-level Python function
@@ -39,17 +41,46 @@ use rust_decimal::Decimal;
 ///     config_json: str — JSON string matching SystemConfig format
 ///     market_data_json: str — JSON array of MarketStreamResult events
 ///     risk_free_return: float — risk-free rate (e.g. 0.05)
+///     strategy: callable — single strategy: fn(state) -> List[OrderRequestOpen]
+///     strategies: dict — multi-strategy: {"name": fn(state) -> List[OrderRequestOpen], ...}
+///     risk: callable — fn(state, opens) -> List[OrderRequestOpen]
+///     on_fill: callable — fn(trade: TradeFill) called on every trade fill
+///     on_position_closed: callable — fn(pos: PositionExited) called when a position closes
 ///
 /// Returns:
 ///     TradingSummary
 #[pyfunction]
-#[pyo3(signature = (config_json, market_data_json, risk_free_return=0.05))]
+#[pyo3(signature = (config_json, market_data_json, risk_free_return=0.05, strategy=None, strategies=None, risk=None, on_fill=None, on_position_closed=None))]
 pub fn run_backtest<'py>(
     py: Python<'py>,
     config_json: String,
     market_data_json: String,
     risk_free_return: f64,
+    strategy: Option<PyObject>,
+    strategies: Option<HashMap<String, PyObject>>,
+    risk: Option<PyObject>,
+    on_fill: Option<PyObject>,
+    on_position_closed: Option<PyObject>,
 ) -> PyResult<Bound<'py, PyAny>> {
+    // Determine strategy IDs for instrument data
+    let strategy_ids: Vec<StrategyId> = if let Some(ref strats) = strategies {
+        strats.keys().map(|k| StrategyId::new(k)).collect()
+    } else {
+        vec![StrategyId::new("default")]
+    };
+
+    // Build the combined strategy callback
+    let py_strategy = if let Some(strats) = strategies {
+        // Multi-strategy: each entry is (name, callback)
+        let combined: Vec<(StrategyId, PyObject)> = strats
+            .into_iter()
+            .map(|(name, cb)| (StrategyId::new(&name), cb))
+            .collect();
+        PyStrategy::new_multi(combined)
+    } else {
+        PyStrategy::new(strategy)
+    };
+
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         // Parse config
         let config: SystemConfig = serde_json::from_str(&config_json)
@@ -97,23 +128,37 @@ pub fn run_backtest<'py>(
             futures,
         } = execution_build;
 
-        // Build EngineState
+        // Build EngineState with PyGlobalData and PyInstrumentData
+        let global_data = PyGlobalData::new(on_fill);
+
+        // Clone the PyObject callback for each instrument's data
+        let on_pos_closed_for_instruments = on_position_closed.map(|obj| {
+            Python::with_gil(|py| obj.clone_ref(py))
+        });
+
         let engine_state = EngineState::builder(
             &instruments,
-            DefaultGlobalData::default(),
-            |_| DefaultInstrumentMarketData::default(),
+            global_data,
+            |_| {
+                let cb = on_pos_closed_for_instruments.as_ref().map(|obj| {
+                    Python::with_gil(|py| obj.clone_ref(py))
+                });
+                PyInstrumentData::new(&strategy_ids, cb)
+            },
         )
         .time_engine_start(time_first)
         .trading_state(TradingState::Enabled)
         .build();
 
         // Build Engine
+        let py_risk = PyRiskManager::new(risk);
+
         let engine = barter::engine::Engine::new(
             clock,
             engine_state,
             execution_tx_map,
-            PyStrategy::default_noop(),
-            PyRiskManager::default_noop(),
+            py_strategy,
+            py_risk,
         );
 
         // Build and run system
@@ -141,7 +186,7 @@ pub fn run_backtest<'py>(
             .trading_summary_generator(rfr)
             .generate(Daily);
 
-        Ok(PyTradingSummary::from_daily(&summary))
+        PyTradingSummary::from_daily(&summary)
     })
 }
 

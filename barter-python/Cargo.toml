@@ -35,3 +35,5 @@ chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 smol_str = { workspace = true }
+fnv = { workspace = true }
+parking_lot = { workspace = true }
